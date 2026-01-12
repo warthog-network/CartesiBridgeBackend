@@ -1,5 +1,5 @@
 // index.js
-console.log("MERGED WITHDRAWAL CODE 1234.45 - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added + PDAI replaced with USDC (Sepolia)+spoofed wwart tracking w correct spoof fetch"); // Updated tag for USDC switch
+console.log("MERGED WITHDRAWAL CODE 1234.456 sub_unlock - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added + PDAI replaced with USDC (Sepolia)+spoofed wwart tracking w correct spoof fetch"); // Updated tag for USDC switch
 
 const ethers = require("ethers");
 const { Wallet } = require("cartesi-wallet");
@@ -386,61 +386,67 @@ const handleAdvance = async (request) => {
 
   // NEW: MERGED sub_unlock (for proof-based or condition-based unlock; unified from "unlock_subwallet")
   if (input?.type === "sub_unlock") {
-    const subAddress = input.subAddress;
-    const subLock = subLocks.get(subAddress) || { locked: false, minted: 0n };
-    if (subLock.locked) {
-      const isValid = (input.condition || "true") === "true"; // Optional condition, default true for testing
-      if (isValid || true) { // For testing, or remove || true in prod
-        subLock.locked = false;
-        const burnAmountE8 = subLock.minted || 0n; // Now E8
-        subLock.minted = 0n;
-        subLocks.set(subAddress, subLock);
-        // Issue voucher for unlock (if needed; skip if 0 value to avoid unnecessary ops)
-        const amount = burnAmountE8; // Already E8
-        if (amount > 0n) { // NEW: Conditional to skip 0-value voucher
-          try {
-            const output = wallet.ether_withdraw(dAppAddress, subAddress, amount); // UPDATED: Use ether_withdraw
-            if (output.type === 'error') { // NEW: Handle Error_out
-              console.error("Voucher creation failed:", output.message);
-              return "reject";
-            }
-            const voucher = output; // Voucher object
-            await fetch(`${rollupServer}/voucher`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(voucher),
-            });
-            console.log(`Subwallet ${subAddress} unlocked with voucher (condition valid)`);
+    const subAddress = input.subAddress?.toLowerCase() ?? "";
 
-            const owner = subLock.owner.toLowerCase();
-            const burnHistory = userBurnHistories.get(owner) || [];
-            burnHistory.push({ amount: burnAmountE8, subAddress, timestamp: Date.now() });
-            userBurnHistories.set(owner, burnHistory);
-
-            const vault = userVaults.get(owner);
-            if (vault) {
-              vault.spoofedBurned += burnAmountE8;
-              userVaults.set(owner, vault);
-            }
-          } catch (e) {
-            console.error("Unlock voucher failed:", e);
-            return "reject";
-          }
-        } else {
-          console.log(`Subwallet ${subAddress} unlocked (no voucher needed for 0 value)`);
-        }
-        await sendNotice(stringToHex(JSON.stringify({ type: "subwallet_unlocked", subAddress, verified: true })));
-      } else {
-        await sendNotice(stringToHex(JSON.stringify({ type: "unlock_failed", subAddress, verified: false })));
-        console.log(`Unlock failed for ${subAddress} (condition invalid)`);
-      }
-    } else {
-      await sendNotice(stringToHex(JSON.stringify({ type: "unlock_failed", subAddress, verified: false })));
-      console.log(`Unlock failed for ${subAddress} (not locked)`);
+    if (!subAddress) {
+        await sendNotice(stringToHex(JSON.stringify({
+            type: "subwallet_unlock_response",
+            success: false,
+            reason: "missing_address"
+        })));
+        return "accept";
     }
-    return "accept";
-  }
 
+    const subLock = subLocks.get(subAddress);
+
+    if (!subLock?.locked) {
+        await sendNotice(stringToHex(JSON.stringify({
+            type: "subwallet_unlock_response",
+            subAddress,
+            success: false,
+            reason: subLock ? "already_unlocked" : "not_found"
+        })));
+        return "accept";
+    }
+
+    // Perform unlock
+    const burnedAmount = subLock.minted || 0n;
+    subLock.locked = false;
+    subLock.minted = 0n;
+    subLocks.set(subAddress, subLock);
+
+    // Optional: update tracking
+    if (subLock.owner) {
+        const owner = subLock.owner.toLowerCase();
+        const vault = userVaults.get(owner);
+        if (vault) {
+            vault.spoofedBurned += burnedAmount;
+            userVaults.set(owner, vault);
+        }
+
+        const history = userBurnHistories.get(owner) || [];
+        history.push({
+            amount: burnedAmount,
+            subAddress,
+            timestamp: Date.now()
+        });
+        userBurnHistories.set(owner, history);
+    }
+
+    // Success notice - this is all the frontend needs
+    await sendNotice(stringToHex(JSON.stringify({
+        type: "subwallet_unlocked",
+        subAddress,
+        verified: true,
+        burnedE8: burnedAmount.toString(),
+        timestamp: Date.now(),
+        message: "Sub-wallet unlocked - you can now withdraw using your private key"
+    })));
+
+    console.log(`[sub_unlock] SUCCESS: ${subAddress} unlocked (${burnedAmount} tracked)`);
+
+    return "accept";
+}
   return "accept";
 };
 
