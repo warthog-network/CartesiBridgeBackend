@@ -1,4 +1,5 @@
-console.log("MERGED WITHDRAWAL CODE 1234.2 - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added+correct sublock validation"); // Tag to confirm merged code loaded
+// index.js
+console.log("MERGED WITHDRAWAL CODE 1234.45 - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added + PDAI replaced with USDC (Sepolia)+spoofed wwart tracking w correct spoof fetch"); // Updated tag for USDC switch
 
 const ethers = require("ethers");
 const { Wallet } = require("cartesi-wallet");
@@ -9,7 +10,7 @@ const wallet = new Wallet(); // Keep original instantiation (no balances Map nee
 // === TOKEN ADDRESSES (Sepolia example — change if needed) ===
 const WWART_ADDRESS = "0xYourWWARTContractHere"; // Replace or leave as-is if not used yet
 const CTSI_ADDRESS = "0xae7f61eCf06C65405560166b259C54031428A9C4";
-const PDAI_ADDRESS = "0xYourPDAIContractHere"; // Placeholder for PDAI (replace with actual address; assumes 6 decimals)
+const USDC_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"; // Real Sepolia USDC (6 decimals)
 
 // === PORTAL ADDRESSES (Sepolia) ===
 const EtherPortal = "0xFfdbe43d4c855BF7e0f105c400A50857f53AB044";
@@ -20,7 +21,9 @@ const dAppAddressRelay = "0xF5DE34d6BbC0446E2a45719E718efEbaaE179daE";
 const userVaults = new Map();           // address → vault object
 let registeredUsers = new Map();        // address → true
 let dAppAddress = "";
-let subLocks = new Map(); // NEW: subAddress → {locked: boolean, owner: string, proof: any} for test lock/unlock
+let subLocks = new Map(); // NEW: subAddress → {locked: boolean, owner: string, proof: any, minted: bigint} for test lock/unlock
+const userMintHistories = new Map(); // user (owner) => array of {amount: bigint, subAddress: string, timestamp: number, txHash: string}
+const userBurnHistories = new Map(); // user (owner) => array of {amount: bigint, subAddress: string, timestamp: number}
 
 const rollupServer = process.env.ROLLUP_HTTP_SERVER_URL;
 console.log("HTTP rollup_server url:", rollupServer);
@@ -93,7 +96,7 @@ const handleAdvance = async (request) => {
     return "accept";
   }
 
-  // 3. ETH DEPOSITS — Use manual parsing for proper depositor extraction (fixes library/version issues and unpadded payload)
+  // 3. ETH DEPOSITS — Use manual parsing for proper depositor extraction
   if (sender === EtherPortal.toLowerCase()) {
     console.log("ETH PORTAL INPUT RECEIVED - PAYLOAD:", request.payload);
 
@@ -124,8 +127,10 @@ const handleAdvance = async (request) => {
       liquid: 0n,
       wWART: 0n,
       CTSI: 0n,
+      usdc: 0n,
       eth: 0n,
-      pdai: 0n
+      spoofedMinted: 0n,
+      spoofedBurned: 0n
     };
 
     vault.eth += amountWei;
@@ -151,11 +156,19 @@ const handleAdvance = async (request) => {
       const token = erc20.toLowerCase();
       const user = exec_layer_sender.toLowerCase();
 
-      let vault = userVaults.get(user) || { liquid: 0n, wWART: 0n, CTSI: 0n, pdai: 0n, eth: 0n };
+      let vault = userVaults.get(user) || { 
+        liquid: 0n, 
+        wWART: 0n, 
+        CTSI: 0n, 
+        usdc: 0n, 
+        eth: 0n,
+        spoofedMinted: 0n,
+        spoofedBurned: 0n
+      };
 
       if (token === WWART_ADDRESS.toLowerCase()) vault.wWART += amount;
       else if (token === CTSI_ADDRESS.toLowerCase()) vault.CTSI += amount;
-      else if (token === PDAI_ADDRESS.toLowerCase()) vault.pdai += amount;
+      else if (token === USDC_ADDRESS.toLowerCase()) vault.usdc += amount;
 
       userVaults.set(user, vault);
 
@@ -176,14 +189,22 @@ const handleAdvance = async (request) => {
       return "reject";
     }
 
-    let vault = userVaults.get(user) || { liquid: 0n, wWART: 0n, CTSI: 0n, pdai: 0n, eth: 0n };
-    const totalBacking = vault.wWART + vault.CTSI + vault.pdai + vault.eth;
+    let vault = userVaults.get(user) || { 
+      liquid: 0n, 
+      wWART: 0n, 
+      CTSI: 0n, 
+      usdc: 0n, 
+      eth: 0n,
+      spoofedMinted: 0n,
+      spoofedBurned: 0n
+    };
+    const totalBacking = vault.wWART + vault.CTSI + vault.usdc + vault.eth;
 
     if (totalBacking > 0n) {
       vault.liquid += totalBacking;
       vault.wWART = 0n;
       vault.CTSI = 0n;
-      vault.pdai = 0n;
+      vault.usdc = 0n;
       vault.eth = 0n;
 
       userVaults.set(user, vault);
@@ -225,14 +246,9 @@ const handleAdvance = async (request) => {
     return hexStr.padStart(length, '0');
   };
 
-  // 7. WITHDRAW ETH — Fully manual voucher encoding (no libraries) - UNCHANGED FROM ORIGINAL
+  // 7. WITHDRAW ETH — Fully manual voucher encoding (no libraries)
   if (input?.type === "withdraw_eth" && input.amount) {
     const user = request.metadata.msg_sender.toLowerCase();
-
-    // if (!registeredUsers.has(user)) {
-    //   console.log("User not registered, ignoring withdrawal");
-    //   return "reject";
-    // }
 
     if (!dAppAddress) {
       console.log("dApp address not relayed yet, cannot withdraw");
@@ -326,16 +342,37 @@ const handleAdvance = async (request) => {
     const subAddress = input.subAddress;
     const proof = input.proof; // Optional for condition-based
     const condition = input.condition || "true"; // Optional, for test/merged
-    const subLock = subLocks.get(subAddress) || { locked: false, owner: input.recipient, proof: null };
+    const subLock = subLocks.get(subAddress) || { locked: false, owner: input.recipient, proof: null, minted: 0n };
     if (!subLock.locked) {
       // Validate: Use proof if present, else condition (for merged test logic)
-     const isValid = proof ? (proof.transaction && proof.transaction.toAddress.toLowerCase() === subAddress.toLowerCase()) : (condition === "true"); // Add real proof validation if needed
+      const isValid = proof ? (proof.transaction && proof.transaction.toAddress.toLowerCase() === subAddress.toLowerCase()) : (condition === "true"); // Add real proof validation if needed
       if (isValid) {
         subLock.locked = true;
         subLock.proof = proof || null;
+        // Extract mint details from proof (keep in E8 as bigint)
+        const mintAmountE8 = proof?.transaction?.amountE8 ? BigInt(proof.transaction.amountE8) : 0n; // Use amountE8
+        subLock.minted = mintAmountE8; // Now store as E8
+        const txHash = proof?.transaction?.txHash || ''; // Use txHash (from logs)
+        const owner = input.recipient.toLowerCase();
+        const history = userMintHistories.get(owner) || [];
+        history.push({ amount: mintAmountE8, subAddress, timestamp: Date.now(), txHash });
+        userMintHistories.set(owner, history);
+
+        const vault = userVaults.get(owner) || {
+          liquid: 0n,
+          wWART: 0n,
+          CTSI: 0n,
+          usdc: 0n,
+          eth: 0n,
+          spoofedMinted: 0n,
+          spoofedBurned: 0n
+        };
+        vault.spoofedMinted += mintAmountE8;
+        userVaults.set(owner, vault);
+
         subLocks.set(subAddress, subLock);
         await sendNotice(stringToHex(JSON.stringify({ type: "subwallet_locked", subAddress, verified: true })));
-        console.log(`Subwallet ${subAddress} locked with proof/condition`);
+        console.log(`Subwallet ${subAddress} locked with proof/condition and spoofed mint recorded: ${mintAmountE8} E8 wWART for ${owner}`);
       } else {
         await sendNotice(stringToHex(JSON.stringify({ type: "lock_failed", subAddress, verified: false })));
         console.log(`Lock failed for ${subAddress} (invalid)`);
@@ -350,14 +387,16 @@ const handleAdvance = async (request) => {
   // NEW: MERGED sub_unlock (for proof-based or condition-based unlock; unified from "unlock_subwallet")
   if (input?.type === "sub_unlock") {
     const subAddress = input.subAddress;
-    const subLock = subLocks.get(subAddress) || { locked: false };
+    const subLock = subLocks.get(subAddress) || { locked: false, minted: 0n };
     if (subLock.locked) {
       const isValid = (input.condition || "true") === "true"; // Optional condition, default true for testing
       if (isValid || true) { // For testing, or remove || true in prod
         subLock.locked = false;
+        const burnAmountE8 = subLock.minted || 0n; // Now E8
+        subLock.minted = 0n;
         subLocks.set(subAddress, subLock);
         // Issue voucher for unlock (if needed; skip if 0 value to avoid unnecessary ops)
-        const amount = 0n; // Placeholder from original
+        const amount = burnAmountE8; // Already E8
         if (amount > 0n) { // NEW: Conditional to skip 0-value voucher
           try {
             const output = wallet.ether_withdraw(dAppAddress, subAddress, amount); // UPDATED: Use ether_withdraw
@@ -372,6 +411,17 @@ const handleAdvance = async (request) => {
               body: JSON.stringify(voucher),
             });
             console.log(`Subwallet ${subAddress} unlocked with voucher (condition valid)`);
+
+            const owner = subLock.owner.toLowerCase();
+            const burnHistory = userBurnHistories.get(owner) || [];
+            burnHistory.push({ amount: burnAmountE8, subAddress, timestamp: Date.now() });
+            userBurnHistories.set(owner, burnHistory);
+
+            const vault = userVaults.get(owner);
+            if (vault) {
+              vault.spoofedBurned += burnAmountE8;
+              userVaults.set(owner, vault);
+            }
           } catch (e) {
             console.error("Unlock voucher failed:", e);
             return "reject";
@@ -395,7 +445,6 @@ const handleAdvance = async (request) => {
 };
 
 // === INSPECT HANDLER ===
-
 const handleInspect = async (rawPayload) => {
   console.log("INSPECT REQUEST - RAW PAYLOAD:", rawPayload || "NO PAYLOAD");
 
@@ -448,16 +497,27 @@ const handleInspect = async (rawPayload) => {
       liquid: 0n,
       wWART: 0n,
       CTSI: 0n,
-      pdai: 0n,
-      eth: 0n
+      usdc: 0n,
+      eth: 0n,
+      spoofedMinted: 0n,
+      spoofedBurned: 0n
     };
+
+    const mintHistory = userMintHistories.get(address) || [];
+    const burnHistory = userBurnHistories.get(address) || [];
+    const totalSpoofedMintedE8 = mintHistory.reduce((sum, m) => sum + m.amount, 0n);
+    const totalSpoofedBurnedE8 = burnHistory.reduce((sum, b) => sum + b.amount, 0n);
 
     const reportPayload = stringToHex(JSON.stringify({
       liquid: vault.liquid.toString(),
       wWART: vault.wWART.toString(),
       CTSI: vault.CTSI.toString(),
-      pdai: vault.pdai.toString(),
-      eth: formatEther(vault.eth),  // ← Clean formatted ETH (e.g., "0.0", "1.5", "0.000123")
+      usdc: vault.usdc.toString(),
+      eth: formatEther(vault.eth),
+      spoofedMintHistory: mintHistory.map(m => ({...m, amount: m.amount.toString()})),
+      spoofedBurnHistory: burnHistory.map(b => ({...b, amount: b.amount.toString()})),
+      totalSpoofedMinted: totalSpoofedMintedE8.toString(),
+      totalSpoofedBurned: totalSpoofedBurnedE8.toString()
     }));
     await sendReport(reportPayload);
     console.log("VAULT REPORT SENT FOR:", address);
