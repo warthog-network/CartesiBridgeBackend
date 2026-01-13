@@ -1,0 +1,19 @@
+[package]
+name = "dapp"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "7895d232" }  # your current commit hash from error — test this first
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "7895d232" }
+p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "7895d232" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "7895d232" }
+
+anyhow = "1.0"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+[[bin]]
+name = "zk-proof-generator"           # ← changed here
+path = "src/bin/zk-proof-generator.rs"

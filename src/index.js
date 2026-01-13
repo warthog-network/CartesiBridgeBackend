@@ -1,5 +1,5 @@
 // index.js
-console.log("MERGED WITHDRAWAL CODE 1234.456 sub_unlock - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added + PDAI replaced with USDC (Sepolia)+spoofed wwart tracking w correct spoof fetch"); // Updated tag for USDC switch
+console.log("MERGED WITHDRAWAL CODE 1234.5 zk generator called from javasript sub_unlock - JAN 2026: Original ETH deposit/withdraw preserved + subwallet test lock/unlock added + PDAI replaced with USDC (Sepolia)+spoofed wwart tracking w correct spoof fetch"); // Updated tag for USDC switch
 
 const ethers = require("ethers");
 const { Wallet } = require("cartesi-wallet");
@@ -381,6 +381,37 @@ const handleAdvance = async (request) => {
       await sendNotice(stringToHex(JSON.stringify({ type: "lock_failed", subAddress, verified: false })));
       console.log(`Lock failed for ${subAddress} (already locked)`);
     }
+    const { spawn } = require('child_process');
+
+    console.log("[ZK TEST] Spawning zk-proof-generator...");
+
+    const proofProcess = spawn('/opt/cartesi/bin/zk-proof-generator', [
+      '--sub-address', subAddress,
+      '--amount', '1000000000',  // test value (1 WART in e8)
+      '--timestamp', Date.now().toString(),
+      '--input-index', (request.metadata.input_index || 0).toString()
+    ]);
+
+    proofProcess.stdout.on('data', (data) => {
+      const output = data.toString().trim();
+      console.log('[ZK OUT]', output);
+
+      // Emit a test notice so frontend can see it worked
+      sendNotice(stringToHex(JSON.stringify({
+        type: "zk_proof_test",
+        message: "Rust zk-proof-generator called successfully",
+        rust_output: output,
+        subAddress: subAddress
+      })));
+    });
+
+    proofProcess.stderr.on('data', (data) => {
+      console.error('[ZK ERROR]', data.toString());
+    });
+
+    proofProcess.on('close', (code) => {
+      console.log(`[ZK] zk-proof-generator exited with code ${code}`);
+    });
     return "accept";
   }
 
